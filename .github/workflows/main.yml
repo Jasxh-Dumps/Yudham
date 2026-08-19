@@ -1,0 +1,384 @@
+name: Yudham Daily
+
+on:
+  schedule:
+    # 03:00 IST
+    - cron: "30 21 * * *"
+
+    # 07:00 IST
+    - cron: "30 1 * * *"
+
+    # 09:00 IST
+    - cron: "30 3 * * *"
+
+    # 16:00 IST
+    - cron: "30 10 * * *"
+
+    # 18:30 IST
+    - cron: "30 13 * * *"
+
+    # 21:30 IST
+    - cron: "30 16 * * *"
+
+  workflow_dispatch:
+
+# Prevent two scheduled runs from modifying runs.json simultaneously.
+concurrency:
+  group: yudham-daily
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+env:
+  REPO: JaswantTeja/erripuka
+  CODESPACE: literate-space-tribble-p5455gv6v4vhr9q7
+  STATE_FILE: state/runs.json
+
+jobs:
+  yudham:
+    runs-on: ubuntu-latest
+
+    steps:
+
+      # ============================================================
+      # CHECKOUT
+      # ============================================================
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+
+      # ============================================================
+      # SELECT TODAY'S ACCOUNT
+      #
+      # First run of the day:
+      #   account1-6 are shuffled.
+      #
+      # Subsequent runs:
+      #   take the next unused account.
+      # ============================================================
+
+      - name: Select account
+        id: account
+        run: |
+          set -e
+
+          TODAY=$(TZ=Asia/Kolkata date +%Y-%m-%d)
+
+          echo "Today: $TODAY"
+
+          # --------------------------------------------------------
+          # Create today's randomized order if needed
+          # --------------------------------------------------------
+
+          CURRENT_DATE=$(jq -r '.date // ""' "$STATE_FILE")
+
+          if [ "$CURRENT_DATE" != "$TODAY" ]; then
+
+            echo "Creating new daily account order..."
+
+            python3 - "$TODAY" "$STATE_FILE" <<'PY'
+          import json
+          import random
+          import sys
+
+          today = sys.argv[1]
+          state_file = sys.argv[2]
+
+          accounts = [
+              "account1",
+              "account2",
+              "account3",
+              "account4",
+              "account5",
+              "account6"
+          ]
+
+          # Same order for this date if the workflow is retried,
+          # but different order on a different day.
+          seed = int(today.replace("-", ""))
+
+          random.seed(seed)
+          random.shuffle(accounts)
+
+          state = {
+              "date": today,
+              "order": accounts,
+              "runs": []
+          }
+
+          with open(state_file, "w") as f:
+              json.dump(state, f, indent=2)
+              f.write("\n")
+
+          print("Today's order:")
+          for i, account in enumerate(accounts, 1):
+              print(f"{i}. {account}")
+          PY
+
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+            git add "$STATE_FILE"
+
+            git diff --cached --quiet || \
+              git commit -m "Initialize daily Yudham account order"
+
+            git push
+
+          fi
+
+
+          # --------------------------------------------------------
+          # Reload state after possible commit
+          # --------------------------------------------------------
+
+          git pull --rebase
+
+
+          # --------------------------------------------------------
+          # Find account that has not completed today.
+          #
+          # If a previous run is "running", retry that account.
+          # --------------------------------------------------------
+
+          ACCOUNT=$(python3 - "$STATE_FILE" <<'PY'
+          import json
+          import sys
+
+          state_file = sys.argv[1]
+
+          with open(state_file) as f:
+              state = json.load(f)
+
+          order = state.get("order", [])
+          runs = state.get("runs", [])
+
+          # Retry an account whose previous workflow died/failed
+          # before marking it completed.
+          for run in runs:
+              if run.get("status") == "running":
+                  print(run["account"])
+                  sys.exit(0)
+
+          completed = {
+              run["account"]
+              for run in runs
+              if run.get("status") == "completed"
+          }
+
+          for account in order:
+              if account not in completed:
+                  print(account)
+                  sys.exit(0)
+
+          # All six already completed.
+          sys.exit(2)
+          PY
+          ) || {
+            echo "All six accounts have already run today."
+            echo "Nothing to do."
+            exit 0
+          }
+
+
+          echo "Selected: $ACCOUNT"
+
+          echo "ACCOUNT=$ACCOUNT" >> "$GITHUB_ENV"
+
+
+      # ============================================================
+      # MARK ACCOUNT AS RUNNING
+      #
+      # This reserves the account before starting Yudham.
+      # ============================================================
+
+      - name: Mark account running
+        run: |
+          TODAY=$(TZ=Asia/Kolkata date +%Y-%m-%d)
+
+          python3 - "$STATE_FILE" "$ACCOUNT" "$TODAY" <<'PY'
+          import json
+          import sys
+          from datetime import datetime, timezone
+
+          state_file = sys.argv[1]
+          account = sys.argv[2]
+          today = sys.argv[3]
+
+          with open(state_file) as f:
+              state = json.load(f)
+
+          runs = state.setdefault("runs", [])
+
+          # Don't duplicate an existing running record.
+          for run in runs:
+              if run["account"] == account and run["status"] == "running":
+                  sys.exit(0)
+
+          runs.append({
+              "account": account,
+              "status": "running",
+              "started_at": datetime.now(timezone.utc).isoformat()
+          })
+
+          with open(state_file, "w") as f:
+              json.dump(state, f, indent=2)
+              f.write("\n")
+          PY
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add "$STATE_FILE"
+          git commit -m "Start Yudham for $ACCOUNT"
+          git push
+
+
+      # ============================================================
+      # STOP ANY EXISTING CODESPACE
+      # ============================================================
+
+      - name: Stop existing Codespace
+        env:
+          GH_TOKEN: ${{ secrets.CODESPACE_TOKEN }}
+        run: |
+          gh codespace stop \
+            --repo "$REPO" \
+            >/dev/null 2>&1 || true
+
+
+      # ============================================================
+      # WAIT FOR SHUTDOWN
+      # ============================================================
+
+      - name: Wait for Shutdown
+        env:
+          GH_TOKEN: ${{ secrets.CODESPACE_TOKEN }}
+        run: |
+          echo "Waiting for Codespace shutdown..."
+
+          while true; do
+
+            STATE=$(gh codespace list \
+              --repo "$REPO" \
+              --json name,state \
+              --jq '.[0].state' \
+              2>/dev/null || true)
+
+            if [ "$STATE" = "Shutdown" ]; then
+              break
+            fi
+
+            sleep 5
+          done
+
+
+      # ============================================================
+      # START CODESPACE
+      # ============================================================
+
+      - name: Start Codespace
+        env:
+          GH_TOKEN: ${{ secrets.CODESPACE_TOKEN }}
+        run: |
+          gh api \
+            -X POST \
+            "/user/codespaces/$CODESPACE/start" \
+            >/dev/null 2>&1
+
+
+      # ============================================================
+      # WAIT FOR AVAILABLE
+      # ============================================================
+
+      - name: Wait for Codespace
+        env:
+          GH_TOKEN: ${{ secrets.CODESPACE_TOKEN }}
+        run: |
+          echo "Waiting for Codespace..."
+
+          while true; do
+
+            STATE=$(gh codespace list \
+              --repo "$REPO" \
+              --json name,state \
+              --jq '.[0].state' \
+              2>/dev/null || true)
+
+            if [ "$STATE" = "Available" ]; then
+              break
+            fi
+
+            sleep 5
+          done
+
+
+      # ============================================================
+      # RUN YUDHAM
+      #
+      # Codespace CLI output is suppressed.
+      # Yudham output is also suppressed.
+      # ============================================================
+
+      - name: Run Yudham
+        env:
+          GH_TOKEN: ${{ secrets.CODESPACE_TOKEN }}
+        run: |
+          gh codespace ssh \
+            --repo "$REPO" \
+            -- "cd /workspaces/erripuka && ./Yudham --user $ACCOUNT" \
+            >/dev/null 2>&1
+
+
+      # ============================================================
+      # MARK ACCOUNT COMPLETED
+      # ============================================================
+
+      - name: Mark account completed
+        if: success()
+        run: |
+          python3 - "$STATE_FILE" "$ACCOUNT" <<'PY'
+          import json
+          import sys
+          from datetime import datetime, timezone
+
+          state_file = sys.argv[1]
+          account = sys.argv[2]
+
+          with open(state_file) as f:
+              state = json.load(f)
+
+          for run in state.get("runs", []):
+              if run["account"] == account:
+                  run["status"] = "completed"
+                  run["completed_at"] = datetime.now(timezone.utc).isoformat()
+
+          with open(state_file, "w") as f:
+              json.dump(state, f, indent=2)
+              f.write("\n")
+          PY
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add "$STATE_FILE"
+          git commit -m "Complete Yudham for $ACCOUNT"
+          git push
+
+
+      # ============================================================
+      # ALWAYS STOP CODESPACE
+      # ============================================================
+
+      - name: Stop Codespace
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.CODESPACE_TOKEN }}
+        run: |
+          gh codespace stop \
+            --repo "$REPO" \
+            >/dev/null 2>&1 || true
