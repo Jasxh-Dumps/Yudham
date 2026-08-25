@@ -12,13 +12,13 @@ on:
     - cron: "30 3 * * *"
 
     # 16:00 IST
-    - cron: "30 10 * * *"
+    - cron: "30 8 * * *"
 
     # 18:30 IST
     - cron: "30 13 * * *"
 
-    # 21:30 IST
-    - cron: "30 16 * * *"
+    # 22:30 IST
+    - cron: "30 17 * * *"
 
   workflow_dispatch:
 
@@ -31,8 +31,8 @@ permissions:
   contents: write
 
 env:
-  REPO: JaswantTeja/erripuka
-  CODESPACE: literate-space-tribble-p5455gv6v4vhr9q7
+  REPO: github/codespaces-blank
+  CODESPACE: crispy-doodle-p7pj9rvrvj742rq96
   STATE_FILE: state/runs.json
 
 jobs:
