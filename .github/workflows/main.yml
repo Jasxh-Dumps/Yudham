@@ -330,7 +330,7 @@ jobs:
         run: |
           gh codespace ssh \
             --repo "$REPO" \
-            -- "cd /workspaces/erripuka && ./Yudham --user $ACCOUNT" \
+            -- "cd /workspaces/codespaces-blank && ./Yudham --user $ACCOUNT" \
             >/dev/null 2>&1
 
 
